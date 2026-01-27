@@ -483,23 +483,61 @@ def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
 def process_weights_after_loading_for_vllm14(self, layer) -> None:
     """This function is used to process the weights after loading for a Linear layer, it is used for vllm 0.14+
 
-    Compared to the original process_weights_after_loading in vllm, we use replace_parameter to
-    preserve the weight_loader attribute which we need for weight refit/reloading.
+    Compared to the original process_weights_after_loading in vllm, we preserve the subclass_type
+    attribute which is needed for weight refit/reloading in verl's fully async policy.
     """
+    from torch.nn import Parameter
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         maybe_post_process_fp8_weight_block,
         process_fp8_weight_block_strategy,
     )
-    from vllm.model_executor.utils import replace_parameter
+    from vllm.model_executor.parameter import (
+        BlockQuantScaleParameter,
+        ModelWeightParameter,
+    )
 
     assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
 
+    def _create_param_from_subclass_attributes(custom_param):
+        param = Parameter(custom_param.data, requires_grad=False)
+        base_param_dir = dir(torch.nn.Parameter)
+        custom_param_dir = dir(custom_param)
+        # Find the attributes that are unique to the custom parameter
+        custom_attributes = [
+            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
+        ]
+        # Set the custom attributes into the base parameter object
+        for attr in custom_attributes:
+            setattr(param, attr, getattr(custom_param, attr))
+
+        param.subclass_type = type(custom_param)
+        return param
+
     weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
     weight, weight_scale = process_fp8_weight_block_strategy(layer.weight, weight_scale)
 
-    replace_parameter(layer, "weight", weight.data)
-    replace_parameter(layer, "weight_scale_inv", weight_scale.data)
+    layer.weight = _create_param_from_subclass_attributes(
+        ModelWeightParameter(
+            data=weight.data,
+            output_dim=0,
+            input_dim=1,
+            weight_loader=layer.weight.weight_loader,
+        )
+    )
+    scale_weight_loader = (
+        layer.weight_scale_inv.weight_loader
+        if hasattr(layer, "weight_scale_inv")
+        else layer.weight_scale.weight_loader
+    )
+    layer.weight_scale_inv = _create_param_from_subclass_attributes(
+        BlockQuantScaleParameter(
+            data=weight_scale.data,
+            output_dim=0,
+            input_dim=1,
+            weight_loader=scale_weight_loader,
+        )
+    )
 
     if hasattr(layer, "weight_scale"):
         del layer.weight_scale
