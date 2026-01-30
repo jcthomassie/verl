@@ -269,6 +269,11 @@ def compute_advantage(
             rollout_is_weights = data.batch.get("rollout_is_weights", None)
             adv_kwargs["rollout_is_weights"] = rollout_is_weights
 
+        # Pass all non_tensor_batch fields to custom advantage estimators
+        for key, value in data.non_tensor_batch.items():
+            if key not in adv_kwargs:
+                adv_kwargs[key] = value
+
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages
